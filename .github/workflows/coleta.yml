@@ -2,71 +2,82 @@ name: coleta-olhovivo
 
 on:
   schedule:
-    - cron: '*/5 * * * *'      # mínimo nativo do GitHub; o loop interno dá 1 min
-  workflow_dispatch:            # permite disparo manual (teste)
+    - cron: '*/5 * * * *'      # reforço: reinicia se a corrente quebrar
+  workflow_dispatch:            # disparo imediato + alvo do auto-redisparo
 
 permissions:
-  contents: write               # necessário pro bot commitar o dado
+  contents: write
 
 concurrency:
-  group: coleta-olhovivo        # serializa: nunca dois jobs colidindo no push
+  group: coleta-olhovivo        # serializa: nunca dois jobs colidindo
   cancel-in-progress: false
 
 jobs:
   coletar:
     runs-on: ubuntu-latest
+    timeout-minutes: 350        # job longo; limite duro do GitHub é 360
     env:
       OLHOVIVO_DIR: ${{ github.workspace }}
       SPTRANS_TOKEN: ${{ secrets.SPTRANS_TOKEN }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      DISPATCH_PAT: ${{ secrets.DISPATCH_PAT }}
       R_LIBS_USER: ${{ github.workspace }}/.rlib
     steps:
       - uses: actions/checkout@v4
-
       - uses: r-lib/actions/setup-r@v2
         with:
-          use-public-rspm: true     # binários Linux (instalação rápida)
-
-      - name: Preparar lib e cache
-        run: mkdir -p "$R_LIBS_USER"
+          use-public-rspm: true
+      - run: mkdir -p "$R_LIBS_USER"
       - uses: actions/cache@v4
         with:
           path: ${{ env.R_LIBS_USER }}
           key: rlib-${{ runner.os }}-httr-jsonlite-datatable-v1
-
       - name: Instalar deps R (só se faltarem)
         run: Rscript -e 'p<-c("httr","jsonlite","data.table"); n<-p[!p %in% rownames(installed.packages())]; if(length(n)) install.packages(n)'
 
-      - name: Coletar (loop 5x60s = 1 min) + velocidade perto de :00 e :30
+      - name: Coletar em loop longo (~5h40, 1 snapshot/min, commit a cada 5 min)
         run: |
+          git config user.name "olhovivo-bot"
+          git config user.email "actions@users.noreply.github.com"
           D="$OLHOVIVO_DIR/data-raw/olhovivo"; mkdir -p "$D"
-          antes=$(ls "$D"/posicao_*.csv.gz 2>/dev/null | wc -l)
-          for i in 1 2 3 4 5; do
+          commit_push() {
+            git add data-raw/olhovivo
+            if git diff --cached --quiet; then
+              curl -s -H "Title: Olho Vivo nuvem: 5 min sem dado" \
+                   -d "Sem novos snapshots em $(date -u). API fora?" \
+                   "https://ntfy.sh/$NTFY_TOPIC" || true
+            else
+              git commit -q -m "coleta $(date -u +%Y%m%dT%H%M%S)"
+              git pull --rebase --autostash -q || true
+              git push -q || true
+            fi
+          }
+          END=$(( $(date +%s) + 5*3600 + 40*60 ))
+          i=0
+          while [ "$(date +%s)" -lt "$END" ]; do
             Rscript R/16_olhovivo_coleta.R || true
             M=$(date +%M)
             if [ "$M" -lt 5 ] || { [ "$M" -ge 30 ] && [ "$M" -lt 35 ]; }; then
               Rscript R/17_olhovivo_velocidade.R || true
             fi
-            if [ "$i" -lt 5 ]; then sleep 60; fi
+            i=$((i+1))
+            if [ $((i % 5)) -eq 0 ] || [ "$i" -eq 2 ]; then commit_push; fi
+            sleep 60
           done
-          depois=$(ls "$D"/posicao_*.csv.gz 2>/dev/null | wc -l)
-          if [ "$depois" -le "$antes" ]; then
-            curl -s -H "Title: Olho Vivo nuvem: run sem dado" \
-                 -d "Coleta vazia em $(date -u). Token expirado ou API fora?" \
-                 "https://ntfy.sh/$NTFY_TOPIC" || true
-          fi
+          commit_push
 
-      - name: Commitar dado
+      - name: Auto-redisparar (corrente contínua) — não depende do cron
+        if: always()
         run: |
-          git config user.name "olhovivo-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add data-raw/olhovivo
-          if git diff --cached --quiet; then
-            echo "nada novo pra commitar"
+          if [ -n "$DISPATCH_PAT" ]; then
+            code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: token $DISPATCH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/coleta.yml/dispatches" \
+              -d '{"ref":"main"}')
+            echo "re-dispatch HTTP $code"
           else
-            git commit -m "coleta $(date -u +%Y%m%dT%H%M%S)"
-            git pull --rebase --autostash || true
-            git push
+            echo "sem DISPATCH_PAT — conto com o cron */5"
           fi
 
       - name: Alerta se o workflow falhar
