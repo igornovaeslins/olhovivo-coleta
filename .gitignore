@@ -1,0 +1,17 @@
+# credenciais — NUNCA versionar
+.Renviron
+.env
+*.token
+
+# artefatos R
+.Rhistory
+.RData
+.Rapp.history
+.Rproj.user/
+*.Rproj
+.rlib/
+
+# sistema
+.DS_Store
+
+# NÃO ignorar data-raw/olhovivo — é o que queremos commitar (a série coletada)
