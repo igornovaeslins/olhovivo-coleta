@@ -1,0 +1,31 @@
+name: watchdog-coleta
+
+# Dead-man's switch: roda independente da coleta e avisa por ntfy se parar de
+# chegar dado novo (cobre falha silenciosa de push, morte da corrente, API fora).
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Alerta ntfy se a coleta parou (>30 min sem dado novo)
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/commits?path=data-raw/olhovivo&per_page=1" \
+            | python3 -c "import sys,json,datetime as dt; d=json.load(sys.stdin); print(int(dt.datetime.fromisoformat(d[0]['commit']['committer']['date'].replace('Z','+00:00')).timestamp()))")
+          now=$(date +%s); age=$(( (now - last) / 60 ))
+          echo "ultimo snapshot commitado ha ${age} min"
+          if [ "$age" -gt 30 ]; then
+            curl -s -H "Title: Olho Vivo nuvem PAROU de coletar" \
+                 -H "Priority: urgent" -H "Tags: warning" \
+                 -d "Sem dado novo ha ${age} min (ultimo commit em data-raw/olhovivo). Conferir: https://github.com/${{ github.repository }}/actions" \
+                 "https://ntfy.sh/$NTFY_TOPIC"
+          else
+            echo "ok: coleta viva"
+          fi
